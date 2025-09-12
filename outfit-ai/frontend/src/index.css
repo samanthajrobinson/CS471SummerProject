@@ -1,0 +1,23 @@
+/* Tailwind v4 */
+@import "tailwindcss";
+
+/* Global look & feel */
+:root { --header-height: 64px; }
+body {
+  background-color: #fff6fa; /* blush-50 */
+  color: #111827;            /* gray-900 */
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+}
+
+/* Header + container */
+.header { @apply h-[var(--header-height)] bg-white border-b border-gray-200 sticky top-0 z-40 shadow-[0_10px_30px_rgba(0,0,0,.06)]; }
+.container-padded { @apply max-w-6xl mx-auto px-4; }
+
+/* Pills (tabs / nav) */
+.tab { @apply px-3 py-1.5 rounded-full bg-white border border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,.06)] text-sm; }
+
+/* Buttons (exact project style) */
+.btn       { @apply px-4 py-2 rounded-full font-black bg-[#f28ab3] border border-[#e07ca6] text-black shadow-[0_10px_30px_rgba(0,0,0,.06)] hover:bg-[#ff99be] transition; }
+.btn-ghost { @apply px-4 py-2 rounded-full font-black bg-white border border-gray-200 text-black shadow-[0_10px_30px_rgba(0,0,0,.06)] hover:bg-[#fff0f6]; }
+.btn-small { @apply px-3 py-1.5 rounded-full text-sm font-black; }
+.icon-btn  { @apply w-8 h-8 grid place-items-center rounded-full bg-white border border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,.06)] hover:bg-[#fff0f6]; }
