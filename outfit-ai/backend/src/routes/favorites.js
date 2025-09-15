@@ -1,114 +1,141 @@
-import express from "express";
+// backend/src/routes/favorites.js
+import { Router } from "express";
+import { query as q, execute as x, isSqlite } from "../db.js";
 import { authRequired, jwtSecret } from "../auth.js";
-import * as DB from "../db.js";
 
-const router = express.Router();
-const isSqlite = !!(DB.db && typeof DB.db.prepare === "function");
-const q = async (sql, p=[]) => isSqlite ? DB.db.prepare(sql).all(...p) : (await DB.pool.query(sql, p))[0];
-const x = async (sql, p=[]) => isSqlite ? DB.db.prepare(sql).run(...p) : (await DB.pool.execute(sql, p))[0];
+const router = Router();
+const INSERT_IGNORE = (table, cols) =>
+  isSqlite
+    ? `INSERT OR IGNORE INTO ${table} (${cols}) VALUES (?, ?)`
+    : `INSERT IGNORE INTO ${table} (${cols}) VALUES (?, ?)`;
 
-// Create favorite (returns outfitId)
+// helper: count likes on an outfit
+async function countLikes(outfitId) {
+  const [row] = await q(
+    `SELECT COUNT(*) AS c FROM favorites WHERE outfit_id = ?`,
+    [outfitId]
+  );
+  return Number(row?.c || 0);
+}
+
+// helper: parse items field that may be JSON string or array
+function parseItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  try {
+    const j = JSON.parse(raw || "[]");
+    return Array.isArray(j) ? j : [];
+  } catch {
+    return [];
+  }
+}
+
+// POST /favorites  (favorite an existing outfit or create from items[])
 router.post("/", authRequired(jwtSecret), async (req, res) => {
   try {
-    const ids = Array.isArray(req.body?.items) ? req.body.items.map(Number).filter(Boolean) : [];
-    if (!ids.length) return res.status(400).json({ error: "items required" });
+    const userId = req.user.id;
+    const outfitIdBody = Number(req.body?.outfitId) || null;
+    let outfitId = outfitIdBody;
 
-    // Create an outfit that references these items
-    const ins = await x(
-      `INSERT INTO outfits (user_id, items) VALUES (?, ?)`,
-      [req.user.id, JSON.stringify(ids)]
-    );
-    const outfitId = ins.insertId ?? ins.lastInsertRowid;
+    if (!outfitId) {
+      const ids = Array.isArray(req.body?.items)
+        ? req.body.items.map(Number).filter(Boolean)
+        : [];
+      if (!ids.length) return res.status(400).json({ error: "items-required" });
 
-    // Favorite it
-    await x(isSqlite
-      ? `INSERT OR IGNORE INTO favorites (user_id, outfit_id) VALUES (?,?)`
-      : `INSERT IGNORE INTO favorites (user_id, outfit_id) VALUES (?,?)`,
-      [req.user.id, outfitId]
-    );
+      const ins = await x(
+        `INSERT INTO outfits (user_id, items) VALUES (?, ?)`,
+        [userId, JSON.stringify(ids)]
+      );
+      outfitId = isSqlite ? ins.lastInsertRowid : ins.insertId;
+    }
 
-    await x(isSqlite
-        ? `INSERT OR IGNORE INTO likes (user_id, outfit_id) VALUES (?,?)`
-        : `INSERT IGNORE INTO likes (user_id, outfit_id) VALUES (?,?)`,
-        [req.user.id, outfitId]
-        );
+    await x(INSERT_IGNORE("favorites", "user_id, outfit_id"), [userId, outfitId]);
+    const likes = await countLikes(outfitId);
 
-    const [row] = await q(`SELECT COUNT(*) AS c FROM likes WHERE outfit_id=?`, [outfitId]);
-    return res.status(201).json({ outfitId, likes: Number(row?.c || 0) });
-
-    res.status(201).json({ outfitId });
+    res.status(outfitIdBody ? 200 : 201).json({ outfitId, likes });
   } catch (e) {
     console.error("POST /favorites", e);
     res.status(500).json({ error: "favorite-failed" });
   }
 });
 
-// Unfavorite
-router.delete("/:id", authRequired(jwtSecret), async (req, res) => {
+// DELETE /favorites/:outfitId
+router.delete("/:outfitId", authRequired(jwtSecret), async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: "invalid id" });
-    await x(`DELETE FROM favorites WHERE user_id=? AND outfit_id=?`, [req.user.id, id]);
-    res.json({ ok: true });
+    const userId = req.user.id;
+    const outfitId = Number(req.params.outfitId);
+    if (!outfitId) return res.status(400).json({ error: "bad-id" });
+
+    await x(`DELETE FROM favorites WHERE user_id = ? AND outfit_id = ?`, [
+      userId, outfitId,
+    ]);
+    const likes = await countLikes(outfitId);
+    res.json({ ok: true, outfitId, likes });
   } catch (e) {
-    console.error("DELETE /favorites/:id", e);
+    console.error("DELETE /favorites/:outfitId", e);
     res.status(500).json({ error: "unfavorite-failed" });
   }
 });
 
-// List favorites — no dependency on non-existent columns
+// GET /favorites  (hydrate items for rendering with images)
 router.get("/", authRequired(jwtSecret), async (req, res) => {
   try {
-    const rows = await q(
+    const userId = req.user.id;
+
+    const favs = await q(
       `
       SELECT
-        f.outfit_id AS id,
+        o.id,
+        o.user_id AS owner_id,
         o.items,
         COALESCE(l.cnt, 0) AS likes
       FROM favorites f
       JOIN outfits  o ON o.id = f.outfit_id
       LEFT JOIN (
         SELECT outfit_id, COUNT(*) AS cnt
-        FROM likes
+        FROM favorites
         GROUP BY outfit_id
       ) l ON l.outfit_id = o.id
       WHERE f.user_id = ?
       ORDER BY o.id DESC
       `,
-      [req.user.id]
+      [userId]
     );
 
-    const out = [];
-    for (const r0 of rows) {
-      let ids = [];
-      try {
-        if (Array.isArray(r0.items)) ids = r0.items;
-        else if (typeof r0.items === "string") ids = JSON.parse(r0.items || "[]");
-      } catch {}
-      let items = [];
-      if (ids.length) {
-        const ph = ids.map(()=>"?").join(",");
-        const got = await q(
-          `SELECT id, category, brand, color, size, status, image_url
-             FROM closet_items
-            WHERE id IN (${ph})`, ids
-        );
-        const map = new Map(got.map(i => [i.id, i]));
-        items = ids.map(id => map.get(id)).filter(Boolean);
-      }
-      out.push({
-        id: r0.id,
-        occasion: null,         // column not present in your schema
-        tempF: null,            // column not present in your schema
-        likes: Number(r0.likes || 0),
-        items
-      });
+    // Collect unique item IDs across all outfits
+    const allIds = new Set();
+    const parsed = favs.map((r) => {
+      const arr = parseItems(r.items).map((x) =>
+        typeof x === "number" ? x : x?.id
+      ).filter(Boolean);
+      for (const id of arr) allIds.add(id);
+      return { outfitId: r.id, likes: Number(r.likes || 0), itemIds: arr };
+    });
+
+    let idToItem = new Map();
+    if (allIds.size) {
+      const ids = Array.from(allIds);
+      const placeholders = ids.map(() => "?").join(",");
+      const rows = await q(
+        `SELECT id, category, brand, size, color, image_url
+         FROM closet_items
+         WHERE id IN (${placeholders})`,
+        ids
+      );
+      idToItem = new Map(rows.map((it) => [it.id, it]));
     }
 
-    res.json(out);
+    const result = parsed.map((p) => ({
+      id: p.outfitId,
+      items: p.itemIds.map((id) => idToItem.get(id)).filter(Boolean),
+      likes: p.likes,
+      favorited: true,
+    }));
+
+    res.json(result);
   } catch (e) {
     console.error("GET /favorites", e);
-    res.status(500).json({ error: "favorites-load-failed", detail: e.message });
+    res.status(500).json({ error: "favorites-list-failed" });
   }
 });
 

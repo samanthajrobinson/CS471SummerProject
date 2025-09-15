@@ -1,0 +1,164 @@
+/* ===== Soft Pink UI (bright-pink primary) ===== */
+:root{
+  /* Pink background + accents */
+  --pink-25:#fff7fb;      /* page wash */
+  --pink-50:#ffeef6;      /* panels hover */
+  --pink-200:#fbd1e3;     /* outlines */
+  --pink-400:#ff7fb6;     /* hover */
+  --pink-500:#ff5aa5;     /* primary buttons */
+  --pink-600:#f34798;     /* primary border/active */
+
+  /* Neutrals */
+  --surface:#ffffff;
+  --line:#eae3ea;
+  --text:#121417;
+  --muted:#667085;
+
+  /* Shape & shadow */
+  --radius:16px;
+  --shadow-sm: 0 2px 8px rgba(16,24,40,.08);
+  --shadow:    0 8px 24px rgba(16,24,40,.10);
+}
+
+*{box-sizing:border-box}
+html,body,#root{height:100%}
+body{
+  margin:0;
+  font-family: Lato, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(900px 500px at 15% -10%, var(--pink-50), transparent 60%),
+    radial-gradient(900px 500px at 110% 0%, var(--pink-25), transparent 55%),
+    #fff;
+}
+
+/* ---------- Header ---------- */
+.header{
+  position:sticky; top:0; z-index:20;
+  background:var(--surface);
+  border-bottom:1px solid var(--line);
+}
+.header-inner{
+  max-width:1140px; margin:0 auto;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:10px 16px;
+}
+.brand{ margin:0; font-size:22px; font-weight:900; letter-spacing:.4px }
+.nav{ display:flex; gap:8px }
+.nav .nav-link{
+  padding:8px 12px; border-radius:999px; text-decoration:none;
+  color:#1f2937; font-weight:800; border:1px solid var(--line);
+  background:#fff;
+}
+.nav .nav-link:hover{ background:var(--pink-25) }
+.nav .nav-link.active{
+  color:#101114;
+  background:var(--pink-500);
+  border-color:var(--pink-600);
+  box-shadow:var(--shadow-sm);
+}
+
+/* ---------- Topbar ---------- */
+.topbar{ max-width:1140px; margin:10px auto 0; padding:0 16px; display:flex; justify-content:flex-end; gap:10px }
+.badge{ background:#fff; border:1px solid var(--line); border-radius:999px; padding:6px 12px; font-size:12px; color:var(--muted) }
+
+/* ---------- Buttons ---------- */
+.btn{
+  background:var(--pink-500); color:#101114;
+  border:1px solid var(--pink-600);
+  border-radius:999px; padding:10px 16px; font-weight:900; cursor:pointer;
+  box-shadow:var(--shadow-sm);
+  transition:transform .12s ease, filter .12s ease, box-shadow .12s ease;
+}
+.btn:hover{ filter:saturate(1.02); transform:translateY(-1px) }
+.btn.gray{ background:#fff; color:#111; border:1px solid var(--line) }
+.btn.small{ padding:6px 10px; font-size:12px }
+
+/* ---------- Page layout ---------- */
+.page{ max-width:1140px; margin:18px auto; padding:0 16px }
+.page.split{ display:grid; grid-template-columns:300px 1fr; gap:18px }
+.side{
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:20px; padding:14px; box-shadow:var(--shadow-sm)
+}
+.side-title{ font-weight:900; margin-bottom:8px }
+
+.catlist{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px }
+.catlist li{
+  padding:12px 14px; border-radius:12px; cursor:pointer; font-weight:800;
+  background:#fff; border:1px solid var(--line);
+}
+.catlist li:hover{ background:var(--pink-25) }
+.catlist li.active{
+  background:#ffd5e7;      /* soft pink fill like screenshot */
+  border-color:var(--pink-200);
+  color:#111;
+}
+.side-btn{ width:100%; margin-top:12px }
+
+/* ---------- Bars / headings ---------- */
+.bar{ display:flex; align-items:center; justify-content:space-between; margin:6px 0 12px }
+h2,h3{ margin:0 }
+
+/* ---------- Tabs / segmented (used on Home weather) ---------- */
+.segmented{
+  display:inline-flex; border:1px solid var(--line); border-radius:999px; background:#fff;
+  box-shadow:var(--shadow-sm); overflow:hidden;
+}
+.segmented button{ border:none; background:transparent; padding:8px 12px; font-weight:900; cursor:pointer }
+.segmented button.active{
+  background:#ffd5e7; border-left:1px solid var(--line); border-right:1px solid var(--line)
+}
+.kicker{ font-size:12px; color:var(--muted); margin-left:8px }
+
+/* ---------- Grid & Cards ---------- */
+.grid{
+  display:grid; grid-template-columns:repeat(4,1fr); gap:16px;
+  justify-content:start; justify-items:start; align-items:start;   /* left-justified */
+}
+@media (max-width:1000px){ .grid{ grid-template-columns:repeat(3,1fr) } }
+@media (max-width:680px){  .grid{ grid-template-columns:repeat(2,1fr) } }
+
+.card{
+  position:relative; background:#fff; border:1px solid var(--line);
+  border-radius:18px; overflow:hidden; box-shadow:var(--shadow);
+}
+.card img{ width:100%; aspect-ratio:1/1; object-fit:cover; background:#f4f4f6 }
+.card .card-actions{ position:absolute; top:10px; right:10px; display:flex; gap:6px }
+.icon-btn{
+  border:none; background:#fff; border:1px solid var(--line);
+  border-radius:999px; padding:6px 8px; cursor:pointer; box-shadow:var(--shadow-sm)
+}
+.meta{ display:flex; gap:6px; flex-wrap:wrap; padding:10px }
+.pill{ background:#fff; border:1px solid var(--line); border-radius:999px; padding:4px 8px; font-size:12px; font-weight:800 }
+
+/* ---------- Outfit card ---------- */
+.outfit{ position:relative; background:#fff; border:1px solid var(--line); border-radius:18px; padding:10px; box-shadow:var(--shadow) }
+.outfit-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px }
+.outfit-grid img{ width:100%; aspect-ratio:1/1; object-fit:cover; background:#f3f4f6; border-radius:10px }
+.fav-btn{
+  position:absolute; top:10px; right:10px;
+  border:1px solid var(--pink-600); background:var(--pink-500); color:#101114;
+  border-radius:999px; padding:6px 10px; font-weight:900; cursor:pointer; box-shadow:var(--shadow-sm)
+}
+
+/* ---------- Auth ---------- */
+.auth-wrap{ display:grid; place-items:center; min-height:calc(100vh - 70px) }
+.auth-card{ background:#fff; border:1px solid var(--line); border-radius:16px; padding:22px; width:380px; max-width:92%; box-shadow:var(--shadow) }
+.form{ display:flex; flex-direction:column; gap:12px }
+.form label{ display:flex; flex-direction:column; gap:6px; font-size:14px; font-weight:800 }
+.form input,.form select{ border:1.5px solid var(--line); border-radius:12px; padding:10px; background:#fff; outline:none }
+.form input:focus,.form select:focus{ border-color:var(--pink-600); box-shadow:0 0 0 4px rgba(255,90,165,.25) }
+
+/* ---------- Modal ---------- */
+.modal-backdrop{ position:fixed; inset:0; background:rgba(17,24,39,.35); display:grid; place-items:center; z-index:30 }
+.modal{
+  background:#fff; border:1px solid var(--line); border-radius:16px;
+  min-width:360px; max-width:92%; padding:18px; box-shadow:var(--shadow)
+}
+.modal-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px }
+
+/* ---------- Helpers ---------- */
+.link{ background:none; border:none; color:#344054; text-decoration:underline; cursor:pointer }
+.muted{ color:var(--muted) }
+.err{ color:#b42318; margin-top:8px }

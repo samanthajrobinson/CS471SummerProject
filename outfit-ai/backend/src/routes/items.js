@@ -1,350 +1,337 @@
 // backend/src/routes/items.js
-import express from "express";
+import { Router } from "express";
 import path from "path";
+import fs from "fs/promises";
+
+import { query as q, execute as x, isSqlite } from "../db.js";
 import { authRequired, jwtSecret } from "../auth.js";
-import * as DB from "../db.js";
-import { upload, maybeRemoveBg, filePathToUrl } from "../upload.js";
+import { upload, maybeRemoveBg } from "../upload.js";
 
-const router = express.Router();
+const router = Router();
 
-// --- DB helpers (MySQL or SQLite) -------------------------------------------
-const isSqlite = !!(DB.db && typeof DB.db.prepare === "function");
+const VALID_STATUS = new Set(["Clean", "Laundry"]);
 
-const q = async (sql, params = []) =>
-  isSqlite ? DB.db.prepare(sql).all(...params) : (await DB.pool.query(sql, params))[0];
+const cleanStr = (v) => (typeof v === "string" ? v.trim() : v ?? null);
+const normStatus = (v) => {
+  const s = cleanStr(v) || "Clean";
+  return VALID_STATUS.has(s) ? s : "Clean";
+};
+const toRelUploads = (abs) => `uploads/${path.basename(abs)}`.replace(/\\/g, "/");
+const rm = async (p) => { try { await fs.unlink(p); } catch {} };
+const IGNORE = (mysql, sqlite, params) => x(isSqlite ? sqlite : mysql, params);
 
-const x = async (sql, params = []) =>
-  isSqlite ? DB.db.prepare(sql).run(...params) : (await DB.pool.execute(sql, params))[0];
-
-// --- utils -------------------------------------------------------------------
-const normStatus = (s) => (/laundry/i.test(String(s)) ? "Laundry" : "Clean");
-
-function parseTags(raw) {
-  if (Array.isArray(raw)) {
-    return raw.map(String).map((t) => t.trim().toLowerCase()).filter(Boolean);
-  }
-  if (typeof raw === "string" && raw.trim()) {
-    // accept JSON array or comma-separated
-    try {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) {
-        return arr.map(String).map((t) => t.trim().toLowerCase()).filter(Boolean);
-      }
-    } catch {
-      return raw
-        .split(",")
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean);
-    }
+/* Convert CSV -> array; array/string -> array of trimmed tags */
+function parseTags(input) {
+  if (Array.isArray(input)) return input.map((t) => `${t}`.trim()).filter(Boolean);
+  if (typeof input === "string") {
+    return input
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
   }
   return [];
 }
 
-async function replaceTags(itemId, tags) {
-  await x(`DELETE FROM item_tags WHERE item_id = ?`, [itemId]);
-  for (const t of tags) {
-    if (isSqlite) {
-      await x(`INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?,?)`, [itemId, t]);
-    } else {
-      await x(`INSERT IGNORE INTO item_tags (item_id, tag) VALUES (?,?)`, [itemId, t]);
-    }
-  }
-}
-
-// --- Routes ------------------------------------------------------------------
-
-/**
- * GET /items
- * Query params:
- *  - category=Shirts|Pants|...|All
- *  - status=Clean|Laundry
- *  - ids=1,2,3 (optional exact subset)
- */
+/* ---------- GET /items  (supports ?category=&status=) ---------- */
 router.get("/", authRequired(jwtSecret), async (req, res) => {
   try {
-    const { category, status, ids } = req.query;
-    const where = ["user_id = ?"];
-    const params = [req.user.id];
+    const userId = req.user.id;
+    const category = cleanStr(req.query.category);
+    const status = cleanStr(req.query.status);
 
-    if (ids) {
-      const idList = String(ids)
-        .split(",")
-        .map((n) => Number(n))
-        .filter((n) => Number.isFinite(n) && n > 0);
-      if (!idList.length) return res.json([]);
-      where.push(`id IN (${idList.map(() => "?").join(",")})`);
-      params.push(...idList);
-    } else {
-      if (category && String(category).toLowerCase() !== "all") {
-        where.push("category = ?");
-        params.push(String(category));
-      }
-      if (status && /^(clean|laundry)$/i.test(String(status))) {
-        where.push("status = ?");
-        params.push(normStatus(status));
-      }
+    const params = [userId];
+    let sql = `
+      SELECT
+        i.id, i.user_id, i.category, i.status,
+        i.brand, i.size, i.color, i.image_url,
+        COALESCE(GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ','), '') AS tags_csv
+      FROM closet_items i
+      LEFT JOIN item_tags t ON t.item_id = i.id
+      WHERE i.user_id = ?
+    `;
+
+    if (category && category !== "All") {
+      sql += " AND i.category = ?";
+      params.push(category);
+    }
+    if (status) {
+      sql += " AND i.status = ?";
+      params.push(status);
     }
 
-    const rows = await q(
-      `SELECT id, user_id, category, brand, color, size, status, image_url
-         FROM closet_items
-        WHERE ${where.join(" AND ")}
-        ORDER BY id DESC`,
-      params
-    );
+    sql += " GROUP BY i.id ORDER BY i.id DESC";
 
-    res.json(rows);
+    const rows = await q(sql, params);
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      user_id: r.user_id,
+      category: r.category,
+      status: r.status,
+      brand: r.brand,
+      size: r.size,
+      color: r.color,
+      image_url: r.image_url,
+      // expose both string and array to keep old/new UIs happy
+      tags: r.tags_csv || "",
+      tags_array: (r.tags_csv ? r.tags_csv.split(",").filter(Boolean) : []),
+    }));
+
+    res.json(items);
   } catch (e) {
     console.error("GET /items", e);
-    res.status(500).json({ error: "items-list-failed", detail: e.message });
+    res.status(500).json({ error: "items-list-failed" });
   }
 });
 
-/**
- * GET /items/:id
- */
+/* ---------- GET /items/:id ---------- */
 router.get("/:id", authRequired(jwtSecret), async (req, res) => {
   try {
     const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "bad-id" });
+
     const [row] = await q(
-      `SELECT id, user_id, category, brand, color, size, status, image_url
-         FROM closet_items
-        WHERE id=? AND user_id=?`,
+      `
+      SELECT
+        i.id, i.user_id, i.category, i.status,
+        i.brand, i.size, i.color, i.image_url,
+        COALESCE(GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ','), '') AS tags_csv
+      FROM closet_items i
+      LEFT JOIN item_tags t ON t.item_id = i.id
+      WHERE i.id = ? AND i.user_id = ?
+      GROUP BY i.id
+      `,
       [id, req.user.id]
     );
     if (!row) return res.status(404).json({ error: "not-found" });
 
-    // tags
-    const tags = await q(`SELECT tag FROM item_tags WHERE item_id=? ORDER BY tag ASC`, [id]);
-    row.tags = tags.map((t) => t.tag);
-
-    res.json(row);
+    res.json({
+      ...row,
+      tags: row.tags_csv || "",
+      tags_array: (row.tags_csv ? row.tags_csv.split(",").filter(Boolean) : []),
+    });
   } catch (e) {
     console.error("GET /items/:id", e);
-    res.status(500).json({ error: "item-load-failed", detail: e.message });
+    res.status(500).json({ error: "item-get-failed" });
   }
 });
 
-/**
- * POST /items
- * multipart/form-data with field "photo"
- * optional: category, status, brand, color, size, tags (array|JSON|CSV)
- */
-router.post("/", authRequired(jwtSecret), upload.single("photo"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res
-        .status(400)
-        .json({ error: "photo required", detail: "multipart field must be 'photo'" });
+/* ---------- POST /items (create) ---------- */
+router.post(
+  "/",
+  authRequired(jwtSecret),
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const category = cleanStr(req.body.category);
+      const brand = cleanStr(req.body.brand);
+      const size = cleanStr(req.body.size);
+      const color = cleanStr(req.body.color);
+      const status = normStatus(req.body.status);
+      const tagsArr = parseTags(req.body.tags);
+
+      if (!category) return res.status(400).json({ error: "category-required" });
+      if (!req.file) return res.status(400).json({ error: "photo-required" });
+
+      // optional background removal
+      let filePath = req.file.path;
+      try {
+        const processed = await maybeRemoveBg(filePath);
+        if (processed && processed !== filePath) {
+          await rm(filePath);
+          filePath = processed;
+        }
+      } catch (e) {
+        console.warn("remove.bg failed, keeping original:", e?.message || e);
+      }
+      const image_url = toRelUploads(filePath);
+
+      const ins = await x(
+        `INSERT INTO closet_items (user_id, category, brand, size, color, status, image_url)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [userId, category, brand, size, color, status, image_url]
+      );
+      const newId = isSqlite ? ins.lastInsertRowid : ins.insertId;
+
+      // save tags in item_tags (schema-agnostic: use only item_id,tag)
+      if (tagsArr.length) {
+        for (const t of tagsArr) {
+          await IGNORE(
+            `INSERT IGNORE INTO item_tags (item_id, tag) VALUES (?, ?)`,
+            `INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?, ?)`,
+            [newId, t]
+          );
+        }
+      }
+
+      const [row] = await q(
+        `
+        SELECT i.id, i.user_id, i.category, i.status, i.brand, i.size, i.color, i.image_url,
+               COALESCE(GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ','), '') AS tags_csv
+        FROM closet_items i
+        LEFT JOIN item_tags t ON t.item_id = i.id
+        WHERE i.id = ?
+        GROUP BY i.id
+        `,
+        [newId]
+      );
+
+      res.status(201).json({
+        ...row,
+        tags: row.tags_csv || "",
+        tags_array: (row.tags_csv ? row.tags_csv.split(",").filter(Boolean) : []),
+      });
+    } catch (e) {
+      console.error("POST /items", e);
+      res.status(500).json({ error: "item-create-failed" });
     }
-
-    // Try background removal
-    const noBg = await maybeRemoveBg(req.file.path);
-    const finalAbs = noBg || req.file.path;
-    const imageUrl = filePathToUrl(finalAbs); // => /uploads/name.png
-
-    const b = req.body || {};
-    const category = String(b.category || "Shirts");
-    const status = normStatus(b.status);
-    const brand = b.brand != null ? String(b.brand) : "";
-    const color = b.color != null ? String(b.color) : "";
-    const size = b.size != null ? String(b.size) : "";
-
-    const tags = parseTags(b.tags);
-
-    const ins = await x(
-      `INSERT INTO closet_items (user_id, category, status, brand, color, size, image_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, category, status, brand, color, size, imageUrl]
-    );
-    const itemId = ins.insertId ?? ins.lastInsertRowid;
-
-    if (tags.length) await replaceTags(itemId, tags);
-
-    const [row] = await q(
-      `SELECT id, user_id, category, brand, color, size, status, image_url
-         FROM closet_items WHERE id=?`,
-      [itemId]
-    );
-
-    res.status(201).json(row || { id: itemId, category, brand, color, size, status, image_url: imageUrl });
-  } catch (e) {
-    console.error("POST /items failed:", e);
-    res.status(500).json({ error: "item-create-failed", detail: e.sqlMessage || e.message });
   }
-});
+);
 
-/**
- * PATCH /items/:id
- * JSON body: any subset of { category, brand, color, size, status, tags }
- * - tags can be array / JSON string / CSV
- * - replaces entire tag set if provided
- */
-router.patch("/:id", authRequired(jwtSecret), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const b = req.body || {};
+/* ---------- PATCH /items/:id (edit) ---------- */
+router.patch(
+  "/:id",
+  authRequired(jwtSecret),
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "bad-id" });
 
-    // Only update provided fields
-    const sets = [];
-    const params = [];
+      const [existing] = await q(
+        `SELECT id, image_url FROM closet_items WHERE id = ? AND user_id = ?`,
+        [id, req.user.id]
+      );
+      if (!existing) return res.status(404).json({ error: "not-found" });
 
-    if (b.category != null) {
-      sets.push("category = ?");
-      params.push(String(b.category));
-    }
-    if (b.brand != null) {
-      sets.push("brand = ?");
-      params.push(String(b.brand));
-    }
-    if (b.color != null) {
-      sets.push("color = ?");
-      params.push(String(b.color));
-    }
-    if (b.size != null) {
-      sets.push("size = ?");
-      params.push(String(b.size));
-    }
-    if (b.status != null) {
-      sets.push("status = ?");
-      params.push(normStatus(b.status));
-    }
+      const fields = {
+        category: cleanStr(req.body.category),
+        brand: cleanStr(req.body.brand),
+        size: cleanStr(req.body.size),
+        color: cleanStr(req.body.color),
+        status: req.body.status ? normStatus(req.body.status) : undefined,
+      };
 
-    if (sets.length) {
-      params.push(id, req.user.id);
-      await x(`UPDATE closet_items SET ${sets.join(", ")} WHERE id=? AND user_id=?`, params);
+      const set = [];
+      const vals = [];
+      for (const [k, v] of Object.entries(fields)) {
+        if (v !== undefined) {
+          set.push(`${k} = ?`);
+          vals.push(v);
+        }
+      }
+
+      // optional new photo
+      if (req.file) {
+        let filePath = req.file.path;
+        try {
+          const processed = await maybeRemoveBg(filePath);
+          if (processed && processed !== filePath) {
+            await rm(filePath);
+            filePath = processed;
+          }
+        } catch (e) {
+          console.warn("remove.bg failed, keeping original:", e?.message || e);
+        }
+        const image_url = toRelUploads(filePath);
+        set.push("image_url = ?");
+        vals.push(image_url);
+
+        // delete old image if replaced
+        if (existing.image_url) {
+          await rm(path.join(process.cwd(), existing.image_url));
+        }
+      }
+
+      if (set.length) {
+        vals.push(id, req.user.id);
+        await x(
+          `UPDATE closet_items SET ${set.join(", ")} WHERE id = ? AND user_id = ?`,
+          vals
+        );
+      }
+
+      // update tags only if client provided them
+      if (Object.prototype.hasOwnProperty.call(req.body, "tags")) {
+        const tagsArr = parseTags(req.body.tags);
+        await x(`DELETE FROM item_tags WHERE item_id = ?`, [id]);
+        for (const t of tagsArr) {
+          await IGNORE(
+            `INSERT IGNORE INTO item_tags (item_id, tag) VALUES (?, ?)`,
+            `INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?, ?)`,
+            [id, t]
+          );
+        }
+      }
+
+      const [row] = await q(
+        `
+        SELECT i.id, i.user_id, i.category, i.status, i.brand, i.size, i.color, i.image_url,
+               COALESCE(GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ','), '') AS tags_csv
+        FROM closet_items i
+        LEFT JOIN item_tags t ON t.item_id = i.id
+        WHERE i.id = ?
+        GROUP BY i.id
+        `,
+        [id]
+      );
+
+      res.json({
+        ...row,
+        tags: row.tags_csv || "",
+        tags_array: (row.tags_csv ? row.tags_csv.split(",").filter(Boolean) : []),
+      });
+    } catch (e) {
+      console.error("PATCH /items/:id", e);
+      res.status(500).json({ error: "item-update-failed" });
     }
-
-    if (b.tags != null) {
-      const tags = parseTags(b.tags);
-      await replaceTags(id, tags);
-    }
-
-    const [row] = await q(
-      `SELECT id, user_id, category, brand, color, size, status, image_url
-         FROM closet_items WHERE id=? AND user_id=?`,
-      [id, req.user.id]
-    );
-    if (!row) return res.status(404).json({ error: "not-found" });
-    const tagRows = await q(`SELECT tag FROM item_tags WHERE item_id=? ORDER BY tag ASC`, [id]);
-    row.tags = tagRows.map((t) => t.tag);
-
-    res.json(row);
-  } catch (e) {
-    console.error("PATCH /items/:id", e);
-    res.status(500).json({ error: "item-update-failed", detail: e.sqlMessage || e.message });
   }
-});
+);
 
-/**
- * PATCH /items/:id/photo
- * multipart/form-data { photo }
- */
-router.patch("/:id/photo", authRequired(jwtSecret), upload.single("photo"), async (req, res) => {
+/* ---------- PATCH /items/batch (multi move to Laundry/Clean) ---------- */
+router.patch("/batch", authRequired(jwtSecret), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "photo required" });
-
-    const id = Number(req.params.id);
-    const noBg = await maybeRemoveBg(req.file.path);
-    const finalAbs = noBg || req.file.path;
-    const imageUrl = filePathToUrl(finalAbs);
-
-    await x(`UPDATE closet_items SET image_url=? WHERE id=? AND user_id=?`, [
-      imageUrl,
-      id,
-      req.user.id,
-    ]);
-
-    const [row] = await q(
-      `SELECT id, user_id, category, brand, color, size, status, image_url
-         FROM closet_items WHERE id=? AND user_id=?`,
-      [id, req.user.id]
-    );
-    if (!row) return res.status(404).json({ error: "not-found" });
-    res.json(row);
-  } catch (e) {
-    console.error("PATCH /items/:id/photo", e);
-    res.status(500).json({ error: "photo-update-failed", detail: e.sqlMessage || e.message });
-  }
-});
-
-/**
- * PATCH /items/:id/status
- * body: { status: "Clean" | "Laundry" }
- */
-router.patch("/:id/status", authRequired(jwtSecret), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
     const status = normStatus(req.body?.status);
-    await x(`UPDATE closet_items SET status=? WHERE id=? AND user_id=?`, [
-      status,
-      id,
-      req.user.id,
-    ]);
-    res.json({ ok: true, status });
-  } catch (e) {
-    console.error("PATCH /items/:id/status", e);
-    res.status(500).json({ error: "status-update-failed", detail: e.sqlMessage || e.message });
-  }
-});
+    if (!ids.length) return res.status(400).json({ error: "ids-required" });
 
-/**
- * POST /items/laundry/bulk
- * body: { ids: number[], status: "Clean" | "Laundry" }
- */
-router.post("/laundry/bulk", authRequired(jwtSecret), async (req, res) => {
-  try {
-    const ids = Array.isArray(req.body?.ids)
-      ? req.body.ids.map(Number).filter((n) => Number.isFinite(n) && n > 0)
-      : [];
-    if (!ids.length) return res.status(400).json({ error: "ids required" });
-
-    const status = normStatus(req.body?.status);
-    const ph = ids.map(() => "?").join(",");
+    const placeholders = ids.map(() => "?").join(",");
     await x(
-      `UPDATE closet_items SET status=? WHERE user_id=? AND id IN (${ph})`,
+      `UPDATE closet_items SET status = ? WHERE user_id = ? AND id IN (${placeholders})`,
       [status, req.user.id, ...ids]
     );
-    res.json({ ok: true, count: ids.length, status });
+
+    res.json({ ok: true, updated: ids.length, status });
   } catch (e) {
-    console.error("POST /items/laundry/bulk", e);
-    res.status(500).json({ error: "bulk-update-failed", detail: e.sqlMessage || e.message });
+    console.error("PATCH /items/batch", e);
+    res.status(500).json({ error: "items-batch-failed" });
   }
 });
 
-/**
- * GET /items/tags
- * Returns distinct tags for the user's closet (for tag dropdown suggestions)
- */
-router.get("/tags/all", authRequired(jwtSecret), async (req, res) => {
-  try {
-    const rows = await q(
-      `SELECT DISTINCT it.tag
-         FROM item_tags it
-         JOIN closet_items ci ON ci.id = it.item_id
-        WHERE ci.user_id = ?
-        ORDER BY it.tag ASC`,
-      [req.user.id]
-    );
-    res.json(rows.map((r) => r.tag));
-  } catch (e) {
-    console.error("GET /items/tags/all", e);
-    res.status(500).json({ error: "tags-load-failed", detail: e.sqlMessage || e.message });
-  }
-});
-
-/**
- * DELETE /items/:id
- */
+/* ---------- DELETE /items/:id ---------- */
 router.delete("/:id", authRequired(jwtSecret), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    await x(`DELETE FROM item_tags WHERE item_id=?`, [id]);
-    await x(`DELETE FROM closet_items WHERE id=? AND user_id=?`, [id, req.user.id]);
+    if (!id) return res.status(400).json({ error: "bad-id" });
+
+    const [existing] = await q(
+      `SELECT id, image_url FROM closet_items WHERE id = ? AND user_id = ?`,
+      [id, req.user.id]
+    );
+    if (!existing) return res.status(404).json({ error: "not-found" });
+
+    await x(`DELETE FROM closet_items WHERE id = ? AND user_id = ?`, [id, req.user.id]);
+    await x(`DELETE FROM item_tags WHERE item_id = ?`, [id]);
+
+    if (existing.image_url) {
+      await rm(path.join(process.cwd(), existing.image_url));
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error("DELETE /items/:id", e);
-    res.status(500).json({ error: "item-delete-failed", detail: e.sqlMessage || e.message });
+    res.status(500).json({ error: "item-delete-failed" });
   }
 });
 

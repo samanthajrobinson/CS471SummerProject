@@ -13,7 +13,7 @@ import { UPLOADS_DIR } from './upload.js';
 import discoverRoutes from "./routes/discover.js";
 
 import likesRoutes from "./routes/likes.js";
-
+import tagsRoutes from "./routes/tags.js";
 
 const app = express();
 
@@ -32,6 +32,7 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 // ---------- Routes (import once, mount anywhere) ----------
 app.use("/likes", likesRoutes);
 app.use("/api/likes", likesRoutes);
+app.use("/tags", tagsRoutes);
 
 app.use('/auth', authRoutes);
 app.use('/api/auth', authRoutes);
