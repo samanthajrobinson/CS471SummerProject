@@ -26,11 +26,9 @@ async function getAutoTempF() {
 
 // ✅ Only these five options
 const OCCASIONS = [
-  { value: "",          label: "Any occasion" },
   { value: "casual",    label: "Casual" },
   { value: "work",      label: "Work" },
   { value: "workout",   label: "Workout" },
-  { value: "going_out", label: "Going out" },
 ];
 
 // try multiple paths until one returns 200 (ignore 404s)
@@ -68,7 +66,7 @@ export default function Home() {
   const [autoNote, setAutoNote] = React.useState("");
 
   // ✅ Occasion state & handler
-  const [occasion, setOccasion] = React.useState(""); // "", "casual", "work", "workout", "going_out"
+  const [occasion, setOccasion] = React.useState("casual"); // "", "casual", "work", "workout", "going_out"
   const changeOccasion = (e) => {
     const v = e.target.value;
     setOccasion(v);

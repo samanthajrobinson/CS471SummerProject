@@ -20,6 +20,11 @@ const toRelUploads = (abs) => `uploads/${path.basename(abs)}`.replace(/\\/g, "/"
 const rm = async (p) => { try { await fs.unlink(p); } catch {} };
 const IGNORE = (mysql, sqlite, params) => x(isSqlite ? sqlite : mysql, params);
 
+const TAGS_AGG = isSqlite
+  ? `GROUP_CONCAT(t.tag, ',')`
+  : `GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',')`;
+
+  
 /* Convert CSV -> array; array/string -> array of trimmed tags */
 function parseTags(input) {
   if (Array.isArray(input)) return input.map((t) => `${t}`.trim()).filter(Boolean);
@@ -34,55 +39,32 @@ function parseTags(input) {
 
 /* ---------- GET /items  (supports ?category=&status=) ---------- */
 router.get("/", authRequired(jwtSecret), async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const category = cleanStr(req.query.category);
-    const status = cleanStr(req.query.status);
+  const userId = req.user.id;
+  const { category } = req.query;
 
-    const params = [userId];
-    let sql = `
-      SELECT
-        i.id, i.user_id, i.category, i.status,
-        i.brand, i.size, i.color, i.image_url,
-        COALESCE(GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ','), '') AS tags_csv
-      FROM closet_items i
-      LEFT JOIN item_tags t ON t.item_id = i.id
-      WHERE i.user_id = ?
-    `;
+  const where = ["i.user_id = ?"];
+  const args = [userId];
+  if (category && category !== "All") { where.push("i.category = ?"); args.push(category); }
 
-    if (category && category !== "All") {
-      sql += " AND i.category = ?";
-      params.push(category);
-    }
-    if (status) {
-      sql += " AND i.status = ?";
-      params.push(status);
-    }
+  const rows = await q(`
+    SELECT
+      i.id, i.user_id, i.category, i.status, i.brand, i.size, i.color, i.image_url,
+      COALESCE(${TAGS_AGG}, '') AS tags_csv
+    FROM closet_items i
+    LEFT JOIN item_tags t ON t.item_id = i.id
+    WHERE ${where.join(" AND ")}
+    GROUP BY i.id
+    ORDER BY i.id DESC
+  `, args);
 
-    sql += " GROUP BY i.id ORDER BY i.id DESC";
+  const data = rows.map(r => ({
+    ...r,
+    tags_array: r.tags_csv ? String(r.tags_csv).split(",").map(s=>s.trim()).filter(Boolean) : []
+  }));
 
-    const rows = await q(sql, params);
-
-    const items = rows.map((r) => ({
-      id: r.id,
-      user_id: r.user_id,
-      category: r.category,
-      status: r.status,
-      brand: r.brand,
-      size: r.size,
-      color: r.color,
-      image_url: r.image_url,
-      // expose both string and array to keep old/new UIs happy
-      tags: r.tags_csv || "",
-      tags_array: (r.tags_csv ? r.tags_csv.split(",").filter(Boolean) : []),
-    }));
-
-    res.json(items);
-  } catch (e) {
-    console.error("GET /items", e);
-    res.status(500).json({ error: "items-list-failed" });
-  }
+  res.json(data);
 });
+
 
 /* ---------- GET /items/:id ---------- */
 router.get("/:id", authRequired(jwtSecret), async (req, res) => {
@@ -334,5 +316,57 @@ router.delete("/:id", authRequired(jwtSecret), async (req, res) => {
     res.status(500).json({ error: "item-delete-failed" });
   }
 });
+
+// --- status-only endpoints ---
+router.patch('/:id/status', authRequired(jwtSecret), async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { status } = req.body;
+
+    // Normalize: Clean -> NULL, Laundry -> 'Laundry'
+    if (status == null || String(status).trim() === '' || String(status).toLowerCase() === 'clean') {
+      status = null;
+    } else if (String(status).toLowerCase() === 'laundry') {
+      status = 'Laundry';
+    }
+
+    await x(
+      `UPDATE closet_items SET status = ? WHERE id = ? AND user_id = ?`,
+      [status, id, req.user.id]
+    );
+    res.json({ ok: true, id: Number(id), status });
+  } catch (e) {
+    console.error('PATCH /items/:id/status', e);
+    res.status(500).json({ error: 'status-update-failed' });
+  }
+});
+
+router.post('/status/bulk', authRequired(jwtSecret), async (req, res) => {
+  try {
+    let { ids = [], status } = req.body;
+    ids = (Array.isArray(ids) ? ids : []).map(Number).filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: 'ids required' });
+
+    if (status == null || String(status).trim() === '' || String(status).toLowerCase() === 'clean') {
+      status = null;
+    } else if (String(status).toLowerCase() === 'laundry') {
+      status = 'Laundry';
+    }
+
+    // Build placeholders for IN (...)
+    const placeholders = ids.map(() => '?').join(',');
+    await x(
+      `UPDATE closet_items SET status = ?
+       WHERE user_id = ? AND id IN (${placeholders})`,
+      [status, req.user.id, ...ids]
+    );
+
+    res.json({ ok: true, updated: ids.length, status });
+  } catch (e) {
+    console.error('POST /items/status/bulk', e);
+    res.status(500).json({ error: 'bulk-status-update-failed' });
+  }
+});
+
 
 export default router;
